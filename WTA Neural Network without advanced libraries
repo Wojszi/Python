@@ -1,0 +1,122 @@
+  #Authors: Wojciech Szindler, Mateusz Sikora
+  
+  import numpy as np
+  import pandas as pd
+  from numpy import random
+  from sklearn.preprocessing import OneHotEncoder
+
+#Neuron function
+
+  def fs(x):
+      return (1/(1+np.exp(-x)))
+  def derivitive(x): #pochodna funkcji aktywacji
+          return 1/(1+np.exp(-x))*(1-fs(x))
+          
+#Creating data subsets: train/val
+
+  wino = pd.read_csv('WineQT.CSV')
+  del wino['Id']
+
+  tmp=int(len(wino)*0.7)
+  train=wino.iloc[:tmp]
+  val=wino.iloc[tmp:]
+
+
+  y1 =train['quality'].to_numpy().reshape(-1,1)
+  encoder = OneHotEncoder(sparse=False)
+  ey=encoder.fit_transform(y1) 
+  del train['quality']
+  x = train.to_numpy()
+
+  y2 =val['quality'].to_numpy().reshape(-1,1)
+  encoder = OneHotEncoder(sparse=False)
+  vey=encoder.fit_transform(y2) 
+  del val['quality']
+  vx = val.to_numpy()
+
+#Creating random wages
+
+  w1=random.uniform(0,1,55)
+  w2=random.uniform(0,1,30)
+  
+#Creating feedforward function
+
+  def ff(w1,w2,x,row):
+    arg=[]    
+    #warstwa ukryta
+    for i in range(5):
+        tmpa = 0
+        for j in range(11):
+            tmpa += w1[j+11*i]*x[row][j]
+        arg.append(fs(tmpa))
+
+    #warstwa wyjściowa
+    out=[]
+    for i in range(6):
+        tmpb = 0
+        for j in range(5):
+            tmpb += w2[j+5*i]*arg[j]
+        out.append(fs(tmpb))
+    return arg,out
+    
+#Creating function finding max values in each layer except input
+
+  def maxy(row):
+    z=ff(w1,w2,x,row)
+    max_arg=np.argmax(z[0])
+    max_out=np.argmax(z[1])
+    return max_arg, max_out
+    
+#Creating learning methods (delta/Kohonen/Widrow-Hoff) WARNING delta method is really slow
+
+  def wh(w,y):
+    return(w+(0.05-y+1)*(y+1))
+
+def koh(w,y):
+    return(w + 0.8*(y - w))
+
+def delta(w,y,x):
+    return(w+(0.05-y+1)*(y+1)*derivitive(x)*error()*0.7)
+
+def wta(w1,w2,ey,row):
+    #zmiana wag wyjściowej
+    for i in range(5):
+        w2[5*maxy(row)[1]+i] = koh(w2[5*maxy(row)[1]+i], ey[row][maxy(row)[1]])
+    #zmiana wag ukrytych
+    for i in range(11):
+        w1[11*maxy(row)[0]+i] = koh(w1[11*maxy(row)[0]+i], ey[row][maxy(row)[1]])
+def accuracy():
+    acc = 0
+    for i in range(tmp):
+        if maxy(i)[1] == np.argmax(ey[i]):
+            acc +=1
+    return((acc/tmp)*100)
+
+def error():
+    for j in range(tmp):
+        suma = 0
+        for i in range(6):
+            suma += (ey[tmp-1][i] - ff(w1,w2,x,tmp-1)[1][i])**2
+        suma = suma/6
+        err = []
+        err.append(suma)
+    err=np.mean(err)
+    return (err)
+    
+#Defining 1 epoch of learning
+  
+  def uczenie(epochs,w1,w2,ey):
+    print(w1,w2)
+    for i in range(epochs):
+        for j in range(tmp):
+            ff(w1,w2,x,j)
+            wta(w1,w2,ey,j)
+        print('blad wynosi', error())
+        print('accuracy wynosi',accuracy())
+        print('')
+        print(f'waga_1: {w1} waga_2: {w2}')
+        print('')
+        
+#Starting learning process with 200 epochs
+
+  uczenie(200,w1,w2,ey)
