@@ -1,0 +1,150 @@
+#authors: Wojciech Szindler, Mateusz Sikora, Marcin Jochlik
+
+
+  import numpy as np
+  import pandas as pd
+  import matplotlib.pyplot as plt
+  import seaborn as sns
+  from collections import Counter
+
+#uploading and formating data
+
+  data = pd.read_csv('student-mat.csv')
+
+  del data['school']
+  del data['Mjob']
+  del data['Fjob']
+  del data['reason']
+  del data['guardian']
+  del data['schoolsup']
+  del data['famsup']
+  del data['nursery']
+  del data['activities']
+  del data['paid']
+
+  data['sex'] = data['sex'].replace("F", "0")
+  data['sex'] = data['sex'].replace("M", "1")
+  data['address'] = data['address'].replace("U", "0")
+  data['address'] = data['address'].replace("R", "1")
+  data['famsize'] = data['famsize'].replace("LE3", "0")
+  data['famsize'] = data['famsize'].replace("GT3", "1")
+  data['Pstatus'] = data['Pstatus'].replace("T", "0")
+  data['Pstatus'] = data['Pstatus'].replace("A", "1")
+  data['higher'] = data['higher'].replace("yes", "1")
+  data['higher'] = data['higher'].replace("no", "0")
+  data['internet'] = data['internet'].replace("yes", "1")
+  data['internet'] = data['internet'].replace("no", "0")
+  data['romantic'] = data['romantic'].replace("yes", "1")
+  data['romantic'] = data['romantic'].replace("no", "0")
+
+  data = data.astype('int64')
+
+#plot showing F/M ratio
+
+  k = len(data.loc[data.sex ==0])
+  m = len(data.loc[data.sex ==1])
+
+  dane1 = [k,m]
+  opis1 = ['Kobiety', 'Mężczyźni']
+
+  palette_color = sns.color_palette('pastel')  
+  plt.pie(dane1, labels=opis1, colors=palette_color, autopct='%.0f%%')
+
+  plt.show()
+
+#barplot showing age structure
+
+  fig, axes = plt.subplots(figsize=(10,5))
+  dane3 = sns.countplot(x='age', data=data)
+  dane3.set_xlabel('Wiek')
+  dane3.set_ylabel('Liczba osób')
+
+  plt.show()
+
+#pieplot showing location
+
+  miasto = len(data.loc[data.address ==0])
+  wies = len(data.loc[data.address ==1])
+
+  dane2 = [miasto,wies]
+  opis2 = ['Miasto', 'Wieś']
+
+  palette_color = sns.color_palette('muted')
+
+  plt.pie(dane2, labels=opis2, colors=palette_color, autopct='%.0f%%')
+
+  plt.show()
+
+#plot showing percentage of people connected to network
+
+  itak = len(data.loc[data.internet ==1])
+  inie = len(data.loc[data.internet ==0])
+
+  dane4 = [itak, inie]
+  opis4 = ["TAK", "NIE"]
+
+  kolor4 = sns.color_palette('flare')
+
+  plt.pie(dane4, labels=opis4, autopct='%.0f%%', startangle = 40, colors = kolor4)
+
+  plt.show()
+
+#barplot showing level of education of parents
+
+  dane5 = [[ len(data.loc[data.Medu ==0]),len(data.loc[data.Medu ==1]),len(data.loc[data.Medu ==2]),len(data.loc[data.Medu ==3]),len(data.loc[data.Medu ==4]) ], [len(data.loc[data.Fedu ==0]),len(data.loc[data.Fedu ==1]),len(data.loc[data.Fedu ==2]),len(data.loc[data.Fedu ==3]),len(data.loc[data.Fedu ==4])]]
+
+  kolumny = ('Brak', 'Podstawowe', 'Gimnazjalne', 'Średnie', 'Wyższe')
+  wiersze = ['Matka', 'Ojciec']
+  kolory = ['orange', 'gray']
+  width = 0.25
+
+  plt.figure(figsize=(20,4))
+
+  plt.bar(np.arange(len(kolumny))- width/2, dane5[0], width=width, color=kolory[0], label=wiersze[0])
+  plt.bar(np.arange(len(kolumny))+ width/2, dane5[1], width=width,
+                color=kolory[1], label=wiersze[1])
+  plt.xticks([])
+  plt.yticks(np.arange(0,250,50))
+
+  tabela = plt.table(cellText=dane5,
+                        rowLabels=wiersze,
+                        rowColours=kolory,
+                        colLabels=kolumny,
+                        loc='bottom')
+  tabela.set_fontsize(10)
+
+  plt.subplots_adjust(left=0.2, bottom=0.)
+
+  plt.show()
+
+#grades with frequency regarding to beeing single or not
+
+  virgin=data.G3.loc[data.romantic < 1]
+  chad=data.G3.loc[data.romantic > 0]
+
+  z1=Counter(virgin)
+  oceny1=[]
+  czestosc1=[]
+  for i in z1:
+          czestosc1.append(z[i])
+          oceny1.append(i)
+
+  z=Counter(chad)
+  oceny=[]
+  czestosc=[]
+  for i in z:
+          czestosc.append(z[i])
+          oceny.append(i)
+
+  plt.title("Oceny")
+  plt.plot(oceny1, czestosc1, "o", color="r", label="single")
+  plt.plot(oceny, czestosc, "+", color="b", label="w związku")
+  plt.xlabel('Oceny', fontsize=10)
+  plt.ylabel('Częstotliwość', fontsize=15)
+  plt.yticks(czestosc)
+  plt.xticks(oceny)
+  plt.legend(loc="upper right")
+  plt.grid()
+
+  plt.show()
+
