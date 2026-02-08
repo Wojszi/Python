@@ -1,0 +1,244 @@
+import pandas as pd
+from scipy.stats import pearsonr, spearmanr, kendalltau
+from sklearn.feature_selection import mutual_info_regression, RFE, SelectKBest, chi2
+from sklearn.metrics import mean_squared_error, roc_auc_score, mean_absolute_error, r2_score, confusion_matrix
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+import seaborn as sns
+from seaborn import histplot, histplot
+import matplotlib.pyplot as plt
+from xgboost import XGBClassifier,XGBRegressor
+import xgboost as xgb
+import numpy as np
+import shap
+
+# Read files (NDA files needed to be erased)
+df_info = pd.read_csv("")
+df_p1 = pd.read_csv("")
+
+#df_p1.head()
+#df_p1.info()
+#df_p1.describe()
+
+# Print unique data for each column
+for i in df_p1.columns:
+    print(i)
+    print(df_p1[i].unique())
+    print('\n\n\n')
+
+# Preparing teacher and dataframe
+y=df_p1['Weight']
+df=df_p1.drop(columns=[''])
+
+# # Print first few rows with biggest value
+#df_p1.sort_values(by=["Weight"], ascending=False).iloc[0:5,:].T
+
+# Pearson correlation matrix
+corr_matrix = df_p1.drop(columns=['Date','EnergyMeterId','PhysicalScaleId','EnginePowerInKilowatts']).corr(method='pearson')
+
+# heatmap
+plt.figure(figsize=(18, 16))
+sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1)
+plt.title('Macierz korelacji Pearson')
+plt.show()
+
+# Kendall correlation matrix
+corr_matrix = df_p1.drop(columns=['']).corr(method='kendall')
+
+# heatmap
+plt.figure(figsize=(18, 16))
+sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1)
+plt.title('Macierz korelacji Kendall')
+plt.show()
+
+# Spearman correlation matrix
+corr_matrix = df_p1.drop(columns=['Date','EnergyMeterId','PhysicalScaleId','EnginePowerInKilowatts']).corr(method='spearman')
+
+# heatmap
+plt.figure(figsize=(18, 16))
+sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1)
+plt.title('Macierz korelacji Spearman')
+plt.show()
+
+# Data split
+data_frame=df_p1[['']]
+X_train, X_temp, y_train, y_temp = train_test_split(data_frame, y, test_size=0.2, random_state=42)
+#X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
+
+# First model with parameters set with optuna
+best_params = {
+    'n_estimators': 922,
+    'max_depth': 10,
+    'learning_rate': 0.11180633361287094,
+    'subsample': 0.64782747388567,
+    'colsample_bytree': 0.8486113697719471,
+    'min_child_weight': 5,
+    'gamma': 0.02373755468121806,
+    'reg_alpha': 1.062639922591284,
+    'reg_lambda': 3.396494440363533,
+    'objective': 'reg:squarederror',
+    'tree_method': 'hist',
+    'random_state': 42
+}
+
+# Data scalling
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X_train)
+
+# Modelu XGBoost
+model = xgb.XGBRegressor(**best_params)
+
+# Training
+model.fit(X_scaled, y_train.values, verbose=True)
+
+# Impact of columns on model
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X_temp)
+shap.summary_plot(shap_values, X_temp)
+
+# Test of model performance
+y_true = y_temp.values
+y_pred = model.predict(X_temp)
+# Compute difference between true value and predicted value
+diff = y_pred - y_true
+
+# MAE
+mae = mean_absolute_error(y_true, y_pred)
+
+# RMSE
+rmse = mean_squared_error(y_true, y_pred, squared=False)
+
+# R²
+r2 = r2_score(y_true, y_pred)
+
+# Print metrics
+print(f"MAE: {mae:.4f}")
+print(f"RMSE: {rmse:.4f}")
+print(f"R²: {r2:.4f}")
+
+comparison = pd.DataFrame({
+    "y_true": y_true,
+    "y_pred": y_pred,
+    "diff": diff
+})
+print(comparison)
+#comparison.sort_values(by=["diff"], ascending=False)
+print(comparison.describe())
+
+# Distribution of differences
+histplot(data=comparison['diff'], bins=100)
+
+# Model performed poorly so we check how many 0 values it has (model predicted only small values and never big ones)
+n=len(df_p1['IsIdle'])
+zero_counts = (df_p1 == 0).sum()
+print(zero_counts/n*100)
+
+# # We chceck how many teacher's values are 0, it apperas there are ~61%
+#n=len(df_p1['Weight'])
+#zero_counts = (df_p1['Weight'] == 0).sum()
+#print(zero_counts/n*100)
+
+# Final data split (different columns, now we take almost all)
+data_frame=df_p1.drop(columns=[''])
+X_train4, X_temp4, y_train4, y_temp4 = train_test_split(data_frame, df_p1['Weight'], test_size=0.2, random_state=42)
+#X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
+
+# Model classifying wheter teacher is bigger or equal 0
+clf = XGBClassifier(
+    max_depth=5,
+    n_estimators=400,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    eval_metric="logloss",
+    random_state=42
+)
+# Training model
+clf.fit(X_train4, (y_train4 > 0).astype(int))
+# p_pos probabylity that teacher > 0
+p_pos = clf.predict_proba(X_temp4)[:, 1]
+mask = y_train4 > 0
+
+# Regression model
+reg = XGBRegressor(
+    max_depth=6,
+    n_estimators=600,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    objective="reg:squarederror",
+    random_state=42
+)
+
+# Training regression model on rows with teacher > 0
+reg.fit(X_train4[mask], y_train4[mask])
+threshold = 0.5 # since which probability we assume teacher is > 0
+positive_mask = p_pos > threshold
+y_reg = np.zeros(len(X_temp4))
+y_reg[positive_mask] = reg.predict(X_temp4[positive_mask])
+y_pred4 = y_reg
+
+
+# Model performance test
+y_true4 = y_temp4.values
+diff4 = y_pred4 - y_true4
+
+# MAE
+mae = mean_absolute_error(y_true4, y_pred4)
+
+# RMSE
+rmse = mean_squared_error(y_true4, y_pred4)
+
+# R²
+r2 = r2_score(y_true4, y_pred4)
+
+# Print metrics
+print(f"MAE: {mae:.4f}")
+print(f"RMSE: {rmse:.4f}")
+print(f"R²: {r2:.4f}")
+
+comparison4 = pd.DataFrame({
+    "y_true": y_true4,
+    "y_pred": y_pred4,
+    "diff": diff4
+})
+print(comparison4.describe())
+
+# How many values bigger than or equal to 0 we have in test set
+print(len(y_true4[y_true4>0]))
+print(len(y_true4[y_true4==0]))
+print(len(y_true4))
+
+# Distribution of differences between true value and predicted value
+histplot(data=comparison4['diff'], bins=100)
+
+# distribution of predicted values
+histplot(data=comparison4['y_pred'], bins=50)
+
+# How many 'big' mistakes model makes
+print(len(comparison4[abs(comparison4['diff'])>1]))
+print(len(comparison4[abs(comparison4['diff'])>1.5]))
+print(len(comparison4[abs(comparison4['diff'])>2]))
+print(len(comparison4[abs(comparison4['diff'])>2.5]))
+print(len(comparison4[abs(comparison4['diff'])>3]))
+
+# testing predictions
+def predict_single(x_single, clf, reg, threshold=0.5):
+    x_single = np.asarray(x_single).reshape(1, -1)
+    p_pos = clf.predict_proba(x_single)[0, 1]
+    return reg.predict(x_single)[0] if p_pos > threshold else 0.0
+
+
+i = 586
+y_pred = predict_single(X_temp4.iloc[i], clf, reg, threshold)
+print(y_pred)
+print(y_temp4.iloc[i])
+
+# Confusion matrix for classification model
+threshold = 0.5
+y_pred_class = (p_pos > threshold).astype(int)
+
+confusion_matrix((y_temp4 > 0).astype(int), y_pred_class)
+
+# How many 'big' teacher's values we have
+df_p1['Weight'][df_p1['Weight'] > 3.6]
