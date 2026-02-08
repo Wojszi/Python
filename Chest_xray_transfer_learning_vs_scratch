@@ -1,0 +1,420 @@
+# !pip install pandas
+# !pip install scikit-learn
+# !pip install tensorflow
+# !pip install numpy
+# !pip install matplotlib
+# !pip install opencv-python
+# !pip install seaborn
+
+import os
+import glob
+import gc
+import cv2
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import (
+    classification_report, confusion_matrix, roc_auc_score,
+    f1_score, matthews_corrcoef, brier_score_loss, average_precision_score,
+    average_precision_score, precision_recall_curve
+)
+import keras
+from keras import layers
+from tensorflow.keras import backend as K
+from tensorflow.keras.preprocessing import image
+from tensorflow.keras.models import Model, load_model
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.applications.resnet50 import preprocess_input as resnet_preprocess
+from tensorflow.keras.layers import Input, GlobalAveragePooling2D, Dense, Dropout, Multiply, Reshape, SpatialDropout2D
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.metrics import AUC, Precision, Recall
+from tensorflow.keras import layers as L, models as M, callbacks as CB, optimizers as OPT
+
+IMG_SIZE = (224, 224)
+BATCH_SIZE = 48
+EPOCHS = 30
+AUTOTUNE = tf.data.AUTOTUNE
+
+# === Dane ===
+main_path = "/mnt/c/Users/Wojtek/Desktop/chest_xray"
+
+train_path = os.path.join(main_path, "train")
+test_path = os.path.join(main_path, "test")
+
+train_normal = glob.glob(train_path + "/NORMAL/*.jpeg")
+train_pneumonia = glob.glob(train_path + "/PNEUMONIA/*.jpeg")
+test_normal = glob.glob(test_path + "/NORMAL/*.jpeg")
+test_pneumonia = glob.glob(test_path + "/PNEUMONIA/*.jpeg")
+
+train_list = train_normal + train_pneumonia
+df_train = pd.DataFrame(
+    np.concatenate([['Normal'] * len(train_normal), ['Pneumonia'] * len(train_pneumonia)]),
+    columns=['class']
+)
+df_train['image'] = train_list
+df_train['id'] = df_train['image'].astype('string').str.extract(r'-(\w+)-', expand=False)
+
+test_list = test_normal + test_pneumonia
+df_test = pd.DataFrame(
+    np.concatenate([['Normal'] * len(test_normal), ['Pneumonia'] * len(test_pneumonia)]),
+    columns=['class']
+)
+df_test['image'] = test_list
+df_test['id'] = df_test['image'].astype('string').str.extract(r'-(\w+)-', expand=False)
+
+df = pd.concat([df_train, df_test])
+label_map = {'Pneumonia': 1, 'Normal': 0}
+df['y'] = df['class'].map(label_map).astype(int)
+y = df['y'].to_numpy()
+groups = df['id'].astype(str).to_numpy()
+
+sgkf = StratifiedGroupKFold(n_splits=11, shuffle=True, random_state=42)
+splits = list(sgkf.split(np.zeros(len(df)), y, groups))
+
+# === Rozkład i przeciek danych ===
+for k, (tr, va) in enumerate(splits, 1):
+    train_ids = set(df.iloc[tr]['id'])
+    val_ids = set(df.iloc[va]['id'])
+    assert train_ids.isdisjoint(val_ids), f"Leakage w foldzie {k}"
+    p_train = df.iloc[tr]['y'].mean()
+    p_val = df.iloc[va]['y'].mean()
+    print(f"Fold {k}: p(PNEUMONIA train)={p_train:.3f},  p(PNEUMONIA val)={p_val:.3f}")
+
+from scipy.stats import chi2_contingency
+alpha = 0.05
+for k, (tr, va) in enumerate(splits, 1):
+    data = np.array([
+        [(df.iloc[tr]['y'] == 1).sum(), (df.iloc[va]['y'] == 1).sum()],
+        [(df.iloc[tr]['y'] == 0).sum(), (df.iloc[va]['y'] == 0).sum()]
+    ])
+    _, p, _, _ = chi2_contingency(data)
+    if p < alpha:
+        print(f"Fold {k}: Istotna różnica p={p:.4f}")
+    else:
+        print(f"Fold {k}: Brak istotnej różnicy p={p:.4f}")
+
+# === Funkcje ===
+
+def apply_clahe_rgb(img):
+    lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    cl = clahe.apply(l)
+    merged = cv2.merge((cl, a, b))
+    return cv2.cvtColor(merged, cv2.COLOR_LAB2RGB)
+
+
+def preprocess_image(image_path, label, augment=False):
+    image_path = image_path.numpy().decode("utf-8")
+
+    img = cv2.imread(image_path)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = cv2.resize(img, IMG_SIZE)
+    img = apply_clahe_rgb(img)
+
+    if augment:
+        if np.random.rand() > 0.5:
+            img = cv2.flip(img, 1)
+        if np.random.rand() > 0.5:
+            angle = np.random.uniform(-15, 15)
+            h, w = img.shape[:2]
+            M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1)
+            img = cv2.warpAffine(img, M, (w, h), borderMode=cv2.BORDER_REFLECT)
+
+    img = img / 255.0
+    return img.astype(np.float32), np.int32(label)
+
+
+def create_dataset(paths, labels, augment=False, shuffle=True):
+    paths = tf.constant(paths)
+    labels = tf.constant(labels, dtype=tf.int32)
+    ds = tf.data.Dataset.from_tensor_slices((paths, labels))
+
+    def _map_fn(x, y):
+        img, lbl = tf.py_function(
+            func=lambda a, b: preprocess_image(a, b, augment),
+            inp=[x, y],
+            Tout=[tf.float32, tf.int32]
+        )
+        img.set_shape((*IMG_SIZE, 3))
+        lbl.set_shape(())
+        return img, lbl
+
+    if shuffle:
+        ds = ds.shuffle(len(paths), reshuffle_each_iteration=True)
+
+    ds = ds.map(_map_fn, num_parallel_calls=AUTOTUNE)
+    ds = ds.batch(BATCH_SIZE).prefetch(AUTOTUNE)
+    return ds
+
+
+def build_resnet(weights=None, radimagenet_path=None, trainable=False):
+    input_tensor = Input(shape=(224, 224, 3))
+
+    if weights == 'radimagenet':
+        base = ResNet50(include_top=False, weights=None, input_tensor=input_tensor)
+        base.load_weights(radimagenet_path)
+    else:
+        base = ResNet50(include_top=False, weights=weights, input_tensor=input_tensor)
+
+    base.trainable = trainable
+
+    x = base.output
+    x = SpatialDropout2D(0.3)(x)
+    x = GlobalAveragePooling2D()(x)
+    x = Dropout(0.2)(x)
+    out = Dense(1, activation='sigmoid')(x)
+
+    model = Model(inputs=input_tensor, outputs=out)
+    model.base_model = base  # <== ważne
+    return model
+
+
+def plot_history(history_dict, title="Training History"):
+    acc = history_dict['accuracy']
+    val_acc = history_dict['val_accuracy']
+    loss = history_dict['loss']
+    val_loss = history_dict['val_loss']
+
+    epochs_range = range(len(acc))
+
+    plt.figure(figsize=(12, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs_range, acc, label='Training Accuracy')
+    plt.plot(epochs_range, val_acc, label='Validation Accuracy')
+    plt.title('Accuracy')
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs_range, loss, label='Training Loss')
+    plt.plot(epochs_range, val_loss, label='Validation Loss')
+    plt.title('Loss')
+    plt.legend()
+
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.show()
+
+
+def evaluate_model(y_true, y_pred, y_prob):
+    report = classification_report(y_true, y_pred, output_dict=True)
+    cm = confusion_matrix(y_true, y_pred)
+    auc = roc_auc_score(y_true, y_prob)
+    return report, cm, auc
+
+
+def specificity_score(y_true, y_pred):
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    return tn / (tn + fp) if (tn + fp) else 0.0
+
+
+def npv_score(y_true, y_pred):
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    return tn / (tn + fn) if (tn + fn) else 0.0
+
+
+def fine_tune_model(model, block_name='conv4_block1'):
+    base_model = model.base_model
+    set_trainable = False
+    for layer in base_model.layers:
+        if layer.name == block_name:
+            set_trainable = True
+        layer.trainable = set_trainable
+    return model
+
+def display_scorecam(img_path, model, conv_layer_name='conv5_block3_out', save_dir='scorecam_outputs'):
+    # Wczytaj i przygotuj obraz
+    img = image.load_img(img_path, target_size=(224, 224))
+    img_array = image.img_to_array(img) / 255.0
+    input_tensor = np.expand_dims(img_array, axis=0)
+
+    # Wydobądź wybraną warstwę konwolucyjną
+    conv_layer = model.get_layer(conv_layer_name).output
+    activation_model = Model(inputs=model.input, outputs=conv_layer)
+
+    # Uzyskaj feature mapy
+    fmaps = activation_model.predict(input_tensor, verbose=0)[0]  # (7, 7, N)
+    h, w, n_maps = fmaps.shape
+
+    # Score-CAM
+    cam = np.zeros((h, w))
+    for i in range(n_maps):
+        fmap = fmaps[:, :, i]
+        fmap_resized = cv2.resize(fmap, (224, 224))
+        normed_fmap = (fmap_resized - np.min(fmap_resized)) / (np.max(fmap_resized) - np.min(fmap_resized) + 1e-8)
+
+        masked_input = img_array * np.expand_dims(normed_fmap, axis=-1)
+        masked_input = np.expand_dims(masked_input, axis=0)
+        pred = model.predict(masked_input, verbose=0)[0][0]
+
+        cam += fmap * pred
+
+    cam = np.maximum(cam, 0)
+    cam /= (np.max(cam) + 1e-8)
+    cam_resized = cv2.resize(cam, (224, 224))
+
+    # Utwórz overlay
+    heatmap = cv2.applyColorMap(np.uint8(255 * cam_resized), cv2.COLORMAP_JET)
+    overlay = np.uint8(255 * img_array)
+    overlayed_img = cv2.addWeighted(overlay, 0.6, heatmap, 0.4, 0)
+
+    # Zapisz obraz
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    filename = os.path.join(save_dir, f"scorecam_{os.path.basename(img_path)}")
+    cv2.imwrite(filename, overlayed_img[..., ::-1])  # RGB → BGR dla OpenCV
+
+    # Pokaż
+    plt.figure(figsize=(5, 5))
+    plt.imshow(overlayed_img[..., ::-1])  # BGR → RGB
+    plt.axis('off')
+    plt.show()
+
+
+def run_cross_validation(df, splits, radimagenet_weights_path=None
+                         ,reps=0
+                        ):    
+    results = []
+
+    for fold, (train_idx, val_idx) in enumerate(splits):
+        reps=reps+1
+        print(f"\n=== Fold {fold+1} ===")
+
+        train_df = df.iloc[train_idx]
+        val_df = df.iloc[val_idx]
+
+        train_ds = create_dataset(train_df['image'].values, train_df['y'].values, augment=True)
+        val_ds   = create_dataset(val_df['image'].values, val_df['y'].values, augment=False)
+
+
+
+        for model_type in ['radimagenet', 'scratch','imagenet']:
+            print(f"\n>>> Training model: {model_type}")
+
+            # Faza 1: z zamrożonym backbone
+            if model_type == 'scratch':
+                model = build_resnet(weights=None)
+            elif model_type == 'imagenet':
+                model = build_resnet(weights='imagenet')
+            elif model_type == 'radimagenet':
+                model = build_resnet(weights='radimagenet', radimagenet_path=radimagenet_weights_path)
+
+            model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+                loss='binary_crossentropy',
+                metrics=['accuracy', Precision(), Recall(), AUC()]
+            )
+
+
+            early = EarlyStopping(patience=5, restore_best_weights=True, monitor='val_loss')
+            reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=2, min_lr=1e-6)
+
+            history = model.fit(
+                train_ds,
+                validation_data=val_ds,
+                epochs=EPOCHS,
+                callbacks=[early, reduce_lr],
+                verbose=1
+            )
+
+            # Faza 2: fine-tuning backbone (tylko dla pretrained modeli)
+            if model_type in ['imagenet', 'radimagenet']:
+                model = fine_tune_model(model, block_name='conv4_block1')
+                model.compile(
+                    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+                    loss='binary_crossentropy',
+                    metrics=['accuracy', Precision(), Recall(), AUC()]
+                )
+            
+                fine_history = model.fit(
+                    train_ds,
+                    validation_data=val_ds,
+                    epochs=EPOCHS,
+                    callbacks=[early, reduce_lr],
+                    verbose=1
+                )
+            
+                # Łączymy historię z fazy 1 i 2
+                combined_history = {
+                    key: history.history[key] + fine_history.history.get(key, [])
+                    for key in history.history
+                }
+            
+                plot_history(combined_history, title=f"{model_type} - Full Training (Fold {fold+1})")
+            
+            else:
+                fine_history = model.fit(
+                train_ds,
+                validation_data=val_ds,
+                epochs=EPOCHS,
+                callbacks=[early, reduce_lr],
+                verbose=1)
+
+                combined_history = {
+                    key: history.history[key] + fine_history.history.get(key, [])
+                    for key in history.history
+                }
+                plot_history(combined_history, title=f"{model_type} - Full Training (Fold {fold+1})")
+
+
+            # Ewaluacja
+            y_true = val_df['y'].values
+            y_prob = model.predict(val_ds).flatten()
+            y_pred = (y_prob > 0.5).astype(int)
+
+            report, cm, auc = evaluate_model(y_true, y_pred, y_prob)
+
+            result = {
+                'fold': fold,
+                'model': model_type,
+                'accuracy': report['accuracy'],
+                'precision': report['1']['precision'],
+                'recall': report['1']['recall'],
+                'f1': report['1']['f1-score'],
+                'auc': auc,
+                'pr_auc': average_precision_score(y_true, y_prob),
+                'specificity': specificity_score(y_true, y_pred),
+                'npv': npv_score(y_true, y_pred),
+                'mcc': matthews_corrcoef(y_true, y_pred),
+                'brier': brier_score_loss(y_true, y_prob)
+            }
+
+            results.append(result)
+            print(f"\n Score-CAM - TP/TN/FP/FN | {model_type} (Fold {fold+1})")
+            
+            val_df = val_df.copy()
+            val_df['y_pred'] = y_pred
+            val_df['y_prob'] = y_prob
+            
+            tp = val_df[(val_df['y'] == 1) & (val_df['y_pred'] == 1)]
+            tn = val_df[(val_df['y'] == 0) & (val_df['y_pred'] == 0)]
+            fp = val_df[(val_df['y'] == 0) & (val_df['y_pred'] == 1)]
+            fn = val_df[(val_df['y'] == 1) & (val_df['y_pred'] == 0)]
+            
+            examples = [('TP', tp), ('TN', tn), ('FP', fp), ('FN', fn)]
+            
+            for label, df_sample in examples:
+                if df_sample.empty:
+                    print(f"{label} — brak przykładów w tym foldzie.")
+                    continue
+                row = df_sample.sample(n=1, random_state=fold).iloc[0]
+                img_path = row['image']
+                pred_prob = row['y_prob']
+                display_scorecam(img_path, model)
+                print(f"{label} | Pred: {row['y_pred']} | True: {row['y']} | Prob: {pred_prob:.2f} | {img_path}")
+
+            K.clear_session()
+            del model
+            gc.collect()
+        if reps==4: 
+            break
+
+    return pd.DataFrame(results)
+
+results_df = run_cross_validation(df, splits, radimagenet_weights_path="/mnt/c/Users/Wojtek/Desktop/RadImageNet-ResNet50_notop.h5")
+print(results_df)
